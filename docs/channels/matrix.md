@@ -24,7 +24,7 @@ openclaw plugins install @openclaw/matrix
 Install from a local checkout:
 
 ```bash
-openclaw plugins install ./extensions/matrix
+openclaw plugins install ./path/to/local/matrix-plugin
 ```
 
 See [Plugins](/tools/plugin) for plugin behavior and install rules.
@@ -187,9 +187,11 @@ done:
 - Media replies still send attachments normally. If a stale preview can no longer be reused safely, OpenClaw redacts it before sending the final media reply.
 - Preview edits cost extra Matrix API calls. Leave streaming off if you want the most conservative rate-limit behavior.
 
-## E2EE setup
+## Encryption and verification
 
-## Bot to bot rooms
+In encrypted (E2EE) rooms, outbound image events use `thumbnail_file` so image previews are encrypted alongside the full attachment. Unencrypted rooms still use plain `thumbnail_url`. No configuration is needed — the plugin detects E2EE state automatically.
+
+### Bot to bot rooms
 
 By default, Matrix messages from other configured OpenClaw Matrix accounts are ignored.
 
@@ -425,6 +427,19 @@ Under OpenClaw's security model, the gateway host and local OpenClaw state direc
 Planned improvement:
 
 - add SecretRef support for persistent Matrix key material so recovery keys and related store-encryption secrets can be sourced from OpenClaw secrets providers instead of only local files
+
+## Profile management
+
+Update the Matrix self-profile for the selected account with:
+
+```bash
+openclaw matrix profile set --name "OpenClaw Assistant"
+openclaw matrix profile set --avatar-url https://cdn.example.org/avatar.png
+```
+
+Add `--account <id>` when you want to target a named Matrix account explicitly.
+
+Matrix accepts `mxc://` avatar URLs directly. When you pass an `http://` or `https://` avatar URL, OpenClaw uploads it to Matrix first and stores the resolved `mxc://` URL back into `channels.matrix.avatarUrl` (or the selected account override).
 
 ## Automatic verification notices
 
@@ -709,7 +724,7 @@ Live directory lookup uses the logged-in Matrix account:
 - `ackReaction`: optional ack reaction override for this channel/account.
 - `ackReactionScope`: optional ack reaction scope override (`group-mentions`, `group-all`, `direct`, `all`, `none`, `off`).
 - `reactionNotifications`: inbound reaction notification mode (`own`, `off`).
-- `mediaMaxMb`: outbound media size cap in MB.
+- `mediaMaxMb`: media size cap in MB for Matrix media handling. It applies to outbound sends and inbound media processing.
 - `autoJoin`: invite auto-join policy (`always`, `allowlist`, `off`). Default: `off`.
 - `autoJoinAllowlist`: rooms/aliases allowed when `autoJoin` is `allowlist`. Alias entries are resolved to room IDs during invite handling; OpenClaw does not trust alias state claimed by the invited room.
 - `dm`: DM policy block (`enabled`, `policy`, `allowFrom`).

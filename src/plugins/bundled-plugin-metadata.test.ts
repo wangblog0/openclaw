@@ -12,6 +12,8 @@ import {
   pluginTestRepoRoot as repoRoot,
   writeJson,
 } from "./generated-plugin-test-helpers.js";
+import { collectBundledRuntimeSidecarPaths } from "./runtime-sidecar-paths-baseline.js";
+import { BUNDLED_RUNTIME_SIDECAR_PATHS } from "./runtime-sidecar-paths.js";
 
 const BUNDLED_PLUGIN_METADATA_TEST_TIMEOUT_MS = 300_000;
 
@@ -59,6 +61,16 @@ describe("bundled plugin metadata", () => {
     },
   );
 
+  it(
+    "matches the checked-in runtime sidecar path baseline",
+    { timeout: BUNDLED_PLUGIN_METADATA_TEST_TIMEOUT_MS },
+    () => {
+      expect(BUNDLED_RUNTIME_SIDECAR_PATHS).toEqual(
+        collectBundledRuntimeSidecarPaths({ rootDir: repoRoot }),
+      );
+    },
+  );
+
   it("captures setup-entry metadata for bundled channel plugins", () => {
     const discord = listBundledPluginMetadata().find((entry) => entry.dirName === "discord");
     expect(discord?.source).toEqual({ source: "./index.ts", built: "index.js" });
@@ -72,6 +84,15 @@ describe("bundled plugin metadata", () => {
     });
     expect(discord?.manifest.id).toBe("discord");
     expect(discord?.manifest.channelConfigs?.discord).toEqual(
+      expect.objectContaining({
+        schema: expect.objectContaining({ type: "object" }),
+      }),
+    );
+  });
+
+  it("loads tlon channel config metadata from the lightweight schema surface", () => {
+    const tlon = listBundledPluginMetadata().find((entry) => entry.dirName === "tlon");
+    expect(tlon?.manifest.channelConfigs?.tlon).toEqual(
       expect.objectContaining({
         schema: expect.objectContaining({ type: "object" }),
       }),
@@ -234,6 +255,10 @@ describe("bundled plugin metadata", () => {
     });
     writeJson(path.join(distRoot, "extensions", "alpha", "openclaw.plugin.json"), {
       id: "alpha",
+      configSchema: {
+        type: "object",
+        properties: {},
+      },
       channels: ["alpha"],
       channelConfigs: {
         alpha: {

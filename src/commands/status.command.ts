@@ -1,7 +1,7 @@
 import { withProgress } from "../cli/progress.js";
 import type { HeartbeatEventPayload } from "../infra/heartbeat-events.js";
 import { normalizeUpdateChannel, resolveUpdateChannelDisplay } from "../infra/update-channels.js";
-import type { Tone } from "../plugin-sdk/memory-core-host-status.js";
+import type { Tone } from "../memory-host-sdk/status.js";
 import { type RuntimeEnv, writeRuntimeJson } from "../runtime.js";
 import type { HealthSummary } from "./health.js";
 import { getDaemonStatusSummary, getNodeDaemonStatusSummary } from "./status.daemon.js";
@@ -255,6 +255,7 @@ export async function statusCommand(
     formatGitInstallLabel,
     formatHealthChannelLines,
     formatKTokens,
+    formatPromptCacheCompact,
     formatPluginCompatibilityNotice,
     formatTimeAgo,
     formatTokensCompact,
@@ -385,6 +386,25 @@ export async function statusCommand(
     : "";
   const eventsValue =
     summary.queuedSystemEvents.length > 0 ? `${summary.queuedSystemEvents.length} queued` : "none";
+  const tasksValue =
+    summary.tasks.total > 0
+      ? [
+          `${summary.tasks.active} active`,
+          `${summary.tasks.byStatus.queued} queued`,
+          `${summary.tasks.byStatus.running} running`,
+          summary.tasks.failures > 0
+            ? warn(`${summary.tasks.failures} issue${summary.tasks.failures === 1 ? "" : "s"}`)
+            : muted("no issues"),
+          summary.taskAudit.errors > 0
+            ? warn(
+                `audit ${summary.taskAudit.errors} error${summary.taskAudit.errors === 1 ? "" : "s"} · ${summary.taskAudit.warnings} warn`,
+              )
+            : summary.taskAudit.warnings > 0
+              ? muted(`audit ${summary.taskAudit.warnings} warn`)
+              : muted("audit clean"),
+          `${summary.tasks.total} tracked`,
+        ].join(" · ")
+      : muted("none");
 
   const probesValue = health ? ok("enabled") : muted("skipped (use --deep)");
 
@@ -502,6 +522,7 @@ export async function statusCommand(
     { Item: "Plugin compatibility", Value: pluginCompatibilityValue },
     { Item: "Probes", Value: probesValue },
     { Item: "Events", Value: eventsValue },
+    { Item: "Tasks", Value: tasksValue },
     { Item: "Heartbeat", Value: heartbeatValue },
     ...(lastHeartbeatValue ? [{ Item: "Last heartbeat", Value: lastHeartbeatValue }] : []),
     {
@@ -523,6 +544,12 @@ export async function statusCommand(
       rows: overviewRows,
     }).trimEnd(),
   );
+  if (summary.taskAudit.errors > 0) {
+    runtime.log("");
+    runtime.log(
+      theme.muted(`Task maintenance: ${formatCliCommand("openclaw tasks maintenance --apply")}`),
+    );
+  }
 
   if (pluginCompatibility.length > 0) {
     runtime.log("");
@@ -643,6 +670,7 @@ export async function statusCommand(
         { key: "Age", header: "Age", minWidth: 9 },
         { key: "Model", header: "Model", minWidth: 14 },
         { key: "Tokens", header: "Tokens", minWidth: 16 },
+        ...(opts.verbose ? [{ key: "Cache", header: "Cache", minWidth: 16, flex: true }] : []),
       ],
       rows:
         summary.sessions.recent.length > 0
@@ -652,6 +680,7 @@ export async function statusCommand(
               Age: sess.updatedAt ? formatTimeAgo(sess.age) : "no activity",
               Model: sess.model ?? "unknown",
               Tokens: formatTokensCompact(sess),
+              ...(opts.verbose ? { Cache: formatPromptCacheCompact(sess) || muted("—") } : {}),
             }))
           : [
               {
@@ -660,6 +689,7 @@ export async function statusCommand(
                 Age: "",
                 Model: "",
                 Tokens: "",
+                ...(opts.verbose ? { Cache: "" } : {}),
               },
             ],
     }).trimEnd(),

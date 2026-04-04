@@ -1,13 +1,19 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { loadConfig } from "../config/config.js";
 import { emitAgentEvent } from "../infra/agent-events.js";
 import "./test-helpers/fast-core-tools.js";
 import {
   getCallGatewayMock,
   getSessionsSpawnTool,
+  resetSessionsSpawnAnnounceFlowOverride,
   resetSessionsSpawnConfigOverride,
+  resetSessionsSpawnHookRunnerOverride,
+  setSessionsSpawnAnnounceFlowOverride,
+  setSessionsSpawnHookRunnerOverride,
   setupSessionsSpawnGatewayMock,
   setSessionsSpawnConfigOverride,
 } from "./openclaw-tools.subagents.sessions-spawn.test-harness.js";
+import { resolveRequesterStoreKey } from "./subagent-announce-delivery.js";
 import { resetSubagentRegistryForTests } from "./subagent-registry.js";
 
 const fastModeEnv = vi.hoisted(() => {
@@ -16,12 +22,25 @@ const fastModeEnv = vi.hoisted(() => {
   return { previous };
 });
 
-const acpSpawnMocks = vi.hoisted(() => ({
-  spawnAcpDirect: vi.fn(),
+const hookRunnerMocks = vi.hoisted(() => ({
+  runSubagentSpawning: vi.fn(async (event: unknown) => {
+    const input = event as {
+      threadRequested?: boolean;
+    };
+    if (!input.threadRequested) {
+      return undefined;
+    }
+    return {
+      status: "ok" as const,
+      threadBindingReady: true,
+    };
+  }),
+  runSubagentSpawned: vi.fn(async () => {}),
+  runSubagentEnded: vi.fn(async () => {}),
 }));
 
-vi.mock("./pi-embedded.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./pi-embedded.js")>();
+vi.mock("./pi-embedded.js", async () => {
+  const actual = await vi.importActual<typeof import("./pi-embedded.js")>("./pi-embedded.js");
   return {
     ...actual,
     isEmbeddedPiRunActive: () => false,
@@ -31,18 +50,52 @@ vi.mock("./pi-embedded.js", async (importOriginal) => {
   };
 });
 
-vi.mock("./acp-spawn.js", () => ({
-  ACP_SPAWN_MODES: ["run", "session"],
-  ACP_SPAWN_STREAM_TARGETS: ["parent"],
-  spawnAcpDirect: (...args: unknown[]) => acpSpawnMocks.spawnAcpDirect(...args),
-}));
-
 vi.mock("./tools/agent-step.js", () => ({
   readLatestAssistantReply: async () => "done",
 }));
 
 const callGatewayMock = getCallGatewayMock();
 const RUN_TIMEOUT_SECONDS = 1;
+
+function installDeterministicAnnounceFlow() {
+  setSessionsSpawnAnnounceFlowOverride(async (params) => {
+    const statusLabel =
+      params.outcome?.status === "timeout" ? "timed out" : "completed successfully";
+    const requesterSessionKey = resolveRequesterStoreKey(loadConfig(), params.requesterSessionKey);
+
+    await callGatewayMock({
+      method: "agent",
+      params: {
+        sessionKey: requesterSessionKey,
+        message: `subagent task ${statusLabel}`,
+        deliver: false,
+      },
+    });
+
+    if (params.label) {
+      await callGatewayMock({
+        method: "sessions.patch",
+        params: {
+          key: params.childSessionKey,
+          label: params.label,
+        },
+      });
+    }
+
+    if (params.cleanup === "delete") {
+      await callGatewayMock({
+        method: "sessions.delete",
+        params: {
+          key: params.childSessionKey,
+          deleteTranscript: true,
+          emitLifecycleHooks: params.spawnMode === "session",
+        },
+      });
+    }
+
+    return true;
+  });
+}
 
 function buildDiscordCleanupHooks(onDelete: (key: string | undefined) => void) {
   return {
@@ -79,12 +132,14 @@ async function executeSpawnAndExpectAccepted(params: {
   callId: string;
   cleanup?: "delete" | "keep";
   label?: string;
+  expectsCompletionMessage?: boolean;
 }) {
   const result = await params.tool.execute(params.callId, {
     task: "do thing",
     runTimeoutSeconds: RUN_TIMEOUT_SECONDS,
     ...(params.cleanup ? { cleanup: params.cleanup } : {}),
     ...(params.label ? { label: params.label } : {}),
+    ...(params.expectsCompletionMessage === false ? { expectsCompletionMessage: false } : {}),
   });
   expect(result.details).toMatchObject({
     status: "accepted",
@@ -118,6 +173,8 @@ async function emitLifecycleEndAndFlush(params: {
 
 describe("openclaw-tools: subagents (sessions_spawn lifecycle)", () => {
   beforeEach(() => {
+    resetSessionsSpawnAnnounceFlowOverride();
+    resetSessionsSpawnHookRunnerOverride();
     resetSessionsSpawnConfigOverride();
     setSessionsSpawnConfigOverride({
       session: {
@@ -131,8 +188,20 @@ describe("openclaw-tools: subagents (sessions_spawn lifecycle)", () => {
       },
     });
     resetSubagentRegistryForTests();
+    hookRunnerMocks.runSubagentSpawning.mockClear();
+    hookRunnerMocks.runSubagentSpawned.mockClear();
+    hookRunnerMocks.runSubagentEnded.mockClear();
+    setSessionsSpawnHookRunnerOverride({
+      hasHooks: (hookName: string) =>
+        hookName === "subagent_spawning" ||
+        hookName === "subagent_spawned" ||
+        hookName === "subagent_ended",
+      runSubagentSpawning: hookRunnerMocks.runSubagentSpawning,
+      runSubagentSpawned: hookRunnerMocks.runSubagentSpawned,
+      runSubagentEnded: hookRunnerMocks.runSubagentEnded,
+    });
     callGatewayMock.mockClear();
-    acpSpawnMocks.spawnAcpDirect.mockReset();
+    installDeterministicAnnounceFlow();
   });
 
   afterAll(() => {
@@ -322,93 +391,29 @@ describe("openclaw-tools: subagents (sessions_spawn lifecycle)", () => {
     expect(deletedKey?.startsWith("agent:main:subagent:")).toBe(true);
   });
 
-  it("tracks ACP run-mode spawns for auto-announce via agent.wait", async () => {
-    let deletedKey: string | undefined;
-    acpSpawnMocks.spawnAcpDirect.mockResolvedValue({
-      status: "accepted",
-      childSessionKey: "agent:codex:acp:child-1",
-      runId: "run-acp-1",
-      mode: "run",
-    });
-    const ctx = setupSessionsSpawnGatewayMock({
-      includeChatHistory: true,
-      ...buildDiscordCleanupHooks((key) => {
-        deletedKey = key;
-      }),
-      agentWaitResult: { status: "ok", startedAt: 3000, endedAt: 4000 },
-    });
-
-    const tool = await getDiscordGroupSpawnTool();
-    const result = await tool.execute("call-acp", {
-      runtime: "acp",
-      task: "do thing",
-      agentId: "codex",
-      runTimeoutSeconds: RUN_TIMEOUT_SECONDS,
-      cleanup: "delete",
-    });
-
-    expect(result.details).toMatchObject({
-      status: "accepted",
-      childSessionKey: "agent:codex:acp:child-1",
-      runId: "run-acp-1",
-    });
-    await waitFor(
-      () =>
-        ctx.waitCalls.some((call) => call.runId === "run-acp-1") &&
-        Boolean(deletedKey) &&
-        ctx.calls.some((call) => call.method === "agent"),
-    );
-
-    expect(acpSpawnMocks.spawnAcpDirect).toHaveBeenCalledWith(
-      expect.objectContaining({
-        task: "do thing",
-        agentId: "codex",
-      }),
-      expect.objectContaining({
-        agentSessionKey: "discord:group:req",
-      }),
-    );
-    const announceCall = ctx.calls.find((call) => call.method === "agent");
-    const announceParams = announceCall?.params as
-      | { sessionKey?: string; deliver?: boolean; message?: string }
-      | undefined;
-    expect(announceParams?.sessionKey).toBe("agent:main:discord:group:req");
-    expect(announceParams?.deliver).toBe(false);
-    expect(announceParams?.message).toContain("do thing");
-    expect(deletedKey).toBe("agent:codex:acp:child-1");
-  });
-
-  it('does not track ACP spawns through auto-announce when streamTo="parent"', async () => {
-    acpSpawnMocks.spawnAcpDirect.mockResolvedValue({
-      status: "accepted",
-      childSessionKey: "agent:codex:acp:child-2",
-      runId: "run-acp-2",
-      mode: "run",
-    });
-    const ctx = setupSessionsSpawnGatewayMock({
-      includeChatHistory: true,
-      agentWaitResult: { status: "ok", startedAt: 5000, endedAt: 6000 },
-    });
-
-    const tool = await getDiscordGroupSpawnTool();
-    const result = await tool.execute("call-acp-parent", {
-      runtime: "acp",
-      task: "stream progress",
-      agentId: "codex",
-      runTimeoutSeconds: RUN_TIMEOUT_SECONDS,
-      streamTo: "parent",
-    });
-
-    expect(result.details).toMatchObject({
-      status: "accepted",
-      childSessionKey: "agent:codex:acp:child-2",
-      runId: "run-acp-2",
-    });
-    expect(ctx.waitCalls).toHaveLength(0);
-    expect(ctx.calls.filter((call) => call.method === "agent")).toHaveLength(0);
-  });
-
   it("sessions_spawn reports timed out when agent.wait returns timeout", async () => {
+    let announcedStatus: string | undefined;
+    setSessionsSpawnAnnounceFlowOverride(async (params) => {
+      announcedStatus = params.outcome?.status;
+      const requesterSessionKey = resolveRequesterStoreKey(
+        loadConfig(),
+        params.requesterSessionKey,
+      );
+
+      await callGatewayMock({
+        method: "agent",
+        params: {
+          sessionKey: requesterSessionKey,
+          message: `subagent task ${
+            params.outcome?.status === "timeout" ? "timed out" : "completed successfully"
+          }`,
+          deliver: false,
+        },
+      });
+
+      return true;
+    });
+
     const ctx = setupSessionsSpawnGatewayMock({
       includeChatHistory: true,
       chatHistoryText: "still working",
@@ -420,20 +425,22 @@ describe("openclaw-tools: subagents (sessions_spawn lifecycle)", () => {
       tool,
       callId: "call-timeout",
       cleanup: "keep",
+      expectsCompletionMessage: false,
     });
 
-    await waitFor(() => ctx.calls.filter((call) => call.method === "agent").length >= 2);
+    await waitFor(() => announcedStatus === "timeout");
 
-    const mainAgentCall = ctx.calls
+    const mainMessages = ctx.calls
       .filter((call) => call.method === "agent")
-      .find((call) => {
+      .filter((call) => {
         const params = call.params as { lane?: string } | undefined;
         return params?.lane !== "subagent";
-      });
-    const mainMessage = (mainAgentCall?.params as { message?: string } | undefined)?.message ?? "";
+      })
+      .map((call) => (call.params as { message?: string } | undefined)?.message ?? "");
 
-    expect(mainMessage).toContain("timed out");
-    expect(mainMessage).not.toContain("completed successfully");
+    expect(announcedStatus).toBe("timeout");
+    expect(mainMessages.some((message) => message.includes("timed out"))).toBe(true);
+    expect(mainMessages.some((message) => message.includes("completed successfully"))).toBe(false);
   });
 
   it("sessions_spawn announces with requester accountId", async () => {

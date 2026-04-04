@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti";
 import { buildChannelConfigSchema } from "../channels/plugins/config-schema.js";
+import type { ChannelConfigRuntimeSchema } from "../channels/plugins/types.plugin.js";
 import { resolveBundledPluginsDir } from "./bundled-dir.js";
 import {
   getPackageManifestMetadata,
@@ -68,6 +69,7 @@ export type BundledPluginMetadata = {
 type ChannelConfigSurface = {
   schema: Record<string, unknown>;
   uiHints?: Record<string, PluginConfigUiHint>;
+  runtime?: ChannelConfigRuntimeSchema;
 };
 
 const bundledPluginMetadataCache = new Map<string, readonly BundledPluginMetadata[]>();
@@ -146,6 +148,9 @@ function isTopLevelPublicSurfaceSource(name: string): boolean {
     return false;
   }
   if (name.endsWith(".d.ts")) {
+    return false;
+  }
+  if (/^config-api(\.[cm]?[jt]s)$/u.test(name)) {
     return false;
   }
   return !/(\.test|\.spec)(\.[cm]?[jt]s)$/u.test(name);
@@ -338,6 +343,9 @@ function collectBundledChannelConfigs(params: {
     existingChannelConfigs[channelId] = {
       schema: surface?.schema ?? existing?.schema ?? {},
       ...(uiHints && Object.keys(uiHints).length > 0 ? { uiHints } : {}),
+      ...((surface?.runtime ?? existing?.runtime)
+        ? { runtime: surface?.runtime ?? existing?.runtime }
+        : {}),
       ...((trimString(existing?.label) ?? trimString(channelMeta?.label))
         ? { label: trimString(existing?.label) ?? trimString(channelMeta?.label)! }
         : {}),
@@ -360,6 +368,7 @@ function collectBundledChannelConfigs(params: {
 function collectBundledPluginMetadataForPackageRoot(
   packageRoot: string,
   includeChannelConfigs: boolean,
+  includeSyntheticChannelConfigs: boolean,
 ): readonly BundledPluginMetadata[] {
   const scanDir = resolveBundledPluginScanDir(packageRoot);
   if (!scanDir || !fs.existsSync(scanDir)) {
@@ -404,13 +413,14 @@ function collectBundledPluginMetadataForPackageRoot(
       ...(setupSourcePath ? { setupEntry: setupSourcePath } : {}),
     });
     const runtimeSidecarArtifacts = collectRuntimeSidecarArtifacts(publicSurfaceArtifacts);
-    const channelConfigs = includeChannelConfigs
-      ? collectBundledChannelConfigs({
-          pluginDir,
-          manifest: manifestResult.manifest,
-          packageManifest,
-        })
-      : manifestResult.manifest.channelConfigs;
+    const channelConfigs =
+      includeChannelConfigs && includeSyntheticChannelConfigs
+        ? collectBundledChannelConfigs({
+            pluginDir,
+            manifest: manifestResult.manifest,
+            packageManifest,
+          })
+        : manifestResult.manifest.channelConfigs;
 
     entries.push({
       dirName,
@@ -448,16 +458,27 @@ function collectBundledPluginMetadataForPackageRoot(
 export function listBundledPluginMetadata(params?: {
   rootDir?: string;
   includeChannelConfigs?: boolean;
+  includeSyntheticChannelConfigs?: boolean;
 }): readonly BundledPluginMetadata[] {
   const rootDir = path.resolve(params?.rootDir ?? OPENCLAW_PACKAGE_ROOT);
   const includeChannelConfigs = params?.includeChannelConfigs ?? !RUNNING_FROM_BUILT_ARTIFACT;
-  const cacheKey = JSON.stringify({ rootDir, includeChannelConfigs });
+  const includeSyntheticChannelConfigs =
+    params?.includeSyntheticChannelConfigs ?? includeChannelConfigs;
+  const cacheKey = JSON.stringify({
+    rootDir,
+    includeChannelConfigs,
+    includeSyntheticChannelConfigs,
+  });
   const cached = bundledPluginMetadataCache.get(cacheKey);
   if (cached) {
     return cached;
   }
   const entries = Object.freeze(
-    collectBundledPluginMetadataForPackageRoot(rootDir, includeChannelConfigs),
+    collectBundledPluginMetadataForPackageRoot(
+      rootDir,
+      includeChannelConfigs,
+      includeSyntheticChannelConfigs,
+    ),
   );
   bundledPluginMetadataCache.set(cacheKey, entries);
   return entries;

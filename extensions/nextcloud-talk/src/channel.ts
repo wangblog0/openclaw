@@ -19,18 +19,19 @@ import {
   createDefaultChannelRuntimeState,
 } from "openclaw/plugin-sdk/status-helpers";
 import {
-  buildChannelConfigSchema,
-  clearAccountEntryFields,
-  DEFAULT_ACCOUNT_ID,
-  type ChannelPlugin,
-  type OpenClawConfig,
-} from "../runtime-api.js";
-import {
   listNextcloudTalkAccountIds,
   resolveDefaultNextcloudTalkAccountId,
   resolveNextcloudTalkAccount,
   type ResolvedNextcloudTalkAccount,
 } from "./accounts.js";
+import { nextcloudTalkApprovalAuth } from "./approval-auth.js";
+import {
+  buildChannelConfigSchema,
+  clearAccountEntryFields,
+  DEFAULT_ACCOUNT_ID,
+  type ChannelPlugin,
+  type OpenClawConfig,
+} from "./channel-api.js";
 import { NextcloudTalkConfigSchema } from "./config-schema.js";
 import { monitorNextcloudTalkProvider } from "./monitor.js";
 import {
@@ -139,6 +140,7 @@ export const nextcloudTalkPlugin: ChannelPlugin<ResolvedNextcloudTalkAccount> =
             },
           }),
       },
+      auth: nextcloudTalkApprovalAuth,
       groups: {
         resolveRequireMention: ({ cfg, accountId, groupId }) => {
           const account = resolveNextcloudTalkAccount({ cfg: cfg as CoreConfig, accountId });

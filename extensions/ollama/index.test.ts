@@ -19,7 +19,7 @@ const promptAndConfigureOllamaMock = vi.hoisted(() =>
 );
 const ensureOllamaModelPulledMock = vi.hoisted(() => vi.fn(async () => {}));
 
-vi.mock("openclaw/plugin-sdk/provider-setup", () => ({
+vi.mock("./api.js", () => ({
   promptAndConfigureOllama: promptAndConfigureOllamaMock,
   ensureOllamaModelPulled: ensureOllamaModelPulledMock,
   configureOllamaNonInteractive: vi.fn(),
@@ -140,6 +140,46 @@ describe("ollama plugin", () => {
     void wrapped?.({} as never, {} as never, {});
     expect(baseStreamFn).toHaveBeenCalledTimes(1);
     expect((payloadSeen?.options as Record<string, unknown> | undefined)?.num_ctx).toBe(202752);
+  });
+
+  it("owns replay policy for OpenAI-compatible Ollama routes only", () => {
+    const provider = registerProvider();
+
+    expect(
+      provider.buildReplayPolicy?.({
+        provider: "ollama",
+        modelApi: "openai-completions",
+        modelId: "qwen3:32b",
+      } as never),
+    ).toMatchObject({
+      sanitizeToolCallIds: true,
+      toolCallIdMode: "strict",
+      applyAssistantFirstOrderingFix: true,
+      validateGeminiTurns: true,
+      validateAnthropicTurns: true,
+    });
+
+    expect(
+      provider.buildReplayPolicy?.({
+        provider: "ollama",
+        modelApi: "openai-responses",
+        modelId: "qwen3:32b",
+      } as never),
+    ).toMatchObject({
+      sanitizeToolCallIds: true,
+      toolCallIdMode: "strict",
+      applyAssistantFirstOrderingFix: false,
+      validateGeminiTurns: false,
+      validateAnthropicTurns: false,
+    });
+
+    expect(
+      provider.buildReplayPolicy?.({
+        provider: "ollama",
+        modelApi: "ollama",
+        modelId: "qwen3.5:9b",
+      } as never),
+    ).toBeUndefined();
   });
 
   it("wraps native Ollama payloads with top-level think=false when thinking is off", () => {
